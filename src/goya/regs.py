@@ -318,6 +318,64 @@ DMA_SRAM_TO_SRAM = 6
 DMA_DRAM_TO_HOST = 7
 
 # ---------------------------------------------------------------------------
+# CPU / PSOC / Firmware communication (derived from Linux goya.c + goyaP.h)
+# ---------------------------------------------------------------------------
+
+# CPU boot status — these are offsets within SRAM (BAR0-mapped)
+# The ARM CPU reads/writes mailbox locations in SRAM for host communication
+CPU_BOOT_STATUS_REG          = 0xC84000   # Boot status register (PSOC scratch)
+CPU_BOOT_ERR0_REG            = 0xC84008   # Boot error register
+CPU_CMD_STATUS_REG           = 0xC84010   # Command status register
+CPU_TIMEOUT_REG              = 0xC84018   # CPU timeout indicator
+
+# CPU boot status values (written by firmware to CPU_BOOT_STATUS_REG)
+CPU_BOOT_STATUS_NA           = 0          # Not available
+CPU_BOOT_STATUS_IN_WFE       = 1          # Wait-for-event (preboot waiting)
+CPU_BOOT_STATUS_DRAM_RDY     = 2          # DRAM initialized and ready
+CPU_BOOT_STATUS_SRAM_AVAIL   = 3          # SRAM KMD available
+CPU_BOOT_STATUS_IN_BTL       = 4          # In bootloader
+CPU_BOOT_STATUS_IN_PREBOOT   = 5          # In preboot
+CPU_BOOT_STATUS_IN_SPL       = 6          # In SPL (secondary program loader)
+CPU_BOOT_STATUS_IN_UBOOT     = 7          # In U-Boot
+CPU_BOOT_STATUS_IN_FW_INIT   = 8          # In firmware init
+CPU_BOOT_STATUS_READY_TO_BOOT = 9         # Ready for FW loading
+CPU_BOOT_STATUS_WAITING_FOR_BOOT_FIT = 10 # Waiting for boot FIT image
+CPU_BOOT_STATUS_SRAM_AVAIL2  = 11         # Extended SRAM available
+
+# CPU command interface
+KMD_MSG_GOTO_WFE             = 1          # Halt CPU (go to wait-for-event)
+KMD_MSG_FIT_RDY              = 2          # FIT image ready in DRAM
+KMD_MSG_SKIP_PLDM            = 3          # Skip PLDM mode
+
+# PSOC registers — PLL, power, etc.
+PSOC_GLOBAL_CONF_BASE        = 0xC40000
+PSOC_GLOBAL_CONF_SCRATCHPAD_0 = 0xC40060  # General-purpose scratch pad
+PSOC_GLOBAL_CONF_CPU_BOOT_STATUS = 0xC84000  # Same as CPU_BOOT_STATUS_REG
+
+# CPU queue registers — host submits messages to CPU via this queue
+CPU_PQ_BASE_ADDR_LOW         = 0xC60000
+CPU_PQ_BASE_ADDR_HIGH        = 0xC60004
+CPU_PQ_LENGTH                = 0xC60008
+CPU_PQ_PI                    = 0xC6000C
+CPU_PQ_CI                    = 0xC60010
+CPU_PQ_CFG                   = 0xC60014
+
+# iATU (Internal Address Translation Unit) for BAR4 remapping
+PCIE_AUX_DBI_REG_ADDR        = 0xC07000
+PCIE_AUX_FLR_CTRL            = 0xC07004
+
+# Firmware filenames (Linux convention — same images work from Windows)
+GOYA_BOOT_FIT_FILE           = "habanalabs/goya/goya-boot-fit.itb"
+GOYA_LINUX_FW_FILE           = "habanalabs/goya/goya-fit.itb"
+
+# Firmware load DRAM address: offset 0 in device DRAM
+FW_LOAD_DRAM_OFFSET          = 0x00000000
+
+# Timeouts
+CPU_BOOT_TIMEOUT_SEC         = 15
+CPU_HALT_TIMEOUT_MS          = 100
+
+# ---------------------------------------------------------------------------
 # Device constants
 # ---------------------------------------------------------------------------
 DRAM_PHYS_DEFAULT_SIZE = 0x100000000   # 4 GB
