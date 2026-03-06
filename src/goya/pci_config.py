@@ -143,8 +143,118 @@ def _read_address(dev_inst: int) -> int:
     return 0
 
 
+def _read_resources_cfgmgr(dev_inst: int) -> tuple[list[PCIBar], int]:
+    """Read allocated resources using CfgMgr32 Logical Configuration APIs.
+
+    This is the proper way to read device resources. Tries multiple
+    configuration types in order of preference:
+    - ALLOC_LOG_CONF (currently allocated)
+    - BOOT_LOG_CONF (boot configuration)
+    """
+    # Log conf types
+    ALLOC_LOG_CONF = 0x00000002
+    BOOT_LOG_CONF = 0x00000000
+
+    for log_conf_type in [ALLOC_LOG_CONF, BOOT_LOG_CONF]:
+        bars, ints = _read_logconf(dev_inst, log_conf_type)
+        if bars:
+            return bars, ints
+
+    # Fallback: try registry
+    return [], 0
+
+
+def _read_logconf(dev_inst: int, log_conf_type: int) -> tuple[list[PCIBar], int]:
+    """Read a specific logical configuration using CM APIs."""
+    bars: list[PCIBar] = []
+    interrupt_count = 0
+    bar_index = 0
+
+    # CM_Get_First_Log_Conf
+    log_conf = ctypes.c_void_p(0)
+    func = _cfgmgr32.CM_Get_First_Log_Conf
+    func.argtypes = [ctypes.POINTER(ctypes.c_void_p), wt.DWORD, wt.ULONG]
+    func.restype = wt.DWORD
+    ret = func(ctypes.byref(log_conf), dev_inst, log_conf_type)
+    if ret != CR_SUCCESS:
+        return bars, interrupt_count
+
+    # CM_Get_Next_Res_Des — iterate through resource descriptors
+    res_des = ctypes.c_void_p(0)
+    res_type = wt.DWORD(0)
+
+    CM_Get_Next = _cfgmgr32.CM_Get_Next_Res_Des
+    CM_Get_Next.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        wt.DWORD,
+        ctypes.POINTER(wt.DWORD),
+        wt.ULONG,
+    ]
+    CM_Get_Next.restype = wt.DWORD
+
+    CM_Get_Data_Size = _cfgmgr32.CM_Get_Res_Des_Data_Size
+    CM_Get_Data_Size.argtypes = [ctypes.POINTER(wt.ULONG), ctypes.c_void_p, wt.ULONG]
+    CM_Get_Data_Size.restype = wt.DWORD
+
+    CM_Get_Data = _cfgmgr32.CM_Get_Res_Des_Data
+    CM_Get_Data.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wt.ULONG, wt.ULONG]
+    CM_Get_Data.restype = wt.DWORD
+
+    CM_Free = _cfgmgr32.CM_Free_Res_Des_Handle
+    CM_Free.argtypes = [ctypes.c_void_p]
+    CM_Free.restype = wt.DWORD
+
+    ResAll = 0x00000000  # All resource types
+    current = log_conf
+
+    while True:
+        new_des = ctypes.c_void_p(0)
+        new_type = wt.DWORD(0)
+        ret = CM_Get_Next(ctypes.byref(new_des), current, ResAll, ctypes.byref(new_type), 0)
+        if ret != CR_SUCCESS:
+            break
+
+        # Get data size
+        data_size = wt.ULONG(0)
+        ret = CM_Get_Data_Size(ctypes.byref(data_size), new_des, 0)
+        if ret == CR_SUCCESS and data_size.value > 0:
+            buf = (ctypes.c_byte * data_size.value)()
+            ret = CM_Get_Data(new_des, buf, data_size.value, 0)
+            if ret == CR_SUCCESS:
+                data = bytes(buf)
+                rtype = new_type.value
+
+                if rtype == CmResourceTypeMemory and len(data) >= 20:
+                    # MEM_RESOURCE: header (4 bytes) + PhysAddr (8 bytes) + Length (4 bytes) + ...
+                    phys_addr = struct.unpack_from("<Q", data, 4)[0]
+                    length = struct.unpack_from("<I", data, 12)[0]
+                    if phys_addr > 0 and length > 0:
+                        bars.append(PCIBar(
+                            index=bar_index,
+                            physical_address=phys_addr,
+                            length=length,
+                            is_memory=True,
+                        ))
+                        bar_index += 1
+
+                elif rtype == CmResourceTypeInterrupt:
+                    interrupt_count += 1
+
+        if current.value != log_conf.value and current.value:
+            CM_Free(current)
+        current = new_des
+
+    if current.value and current.value != log_conf.value:
+        CM_Free(current)
+
+    _cfgmgr32.CM_Free_Log_Conf_Handle(log_conf)
+
+    return bars, interrupt_count
+
+
 def _read_resources_from_registry(instance_id: str) -> tuple[list[PCIBar], int]:
-    """Read allocated resources from the registry.
+    """Fallback: read allocated resources from the registry.
 
     Windows stores PCI resource assignments at:
     HKLM\\SYSTEM\\CurrentControlSet\\Enum\\<instance_id>\\LogConf
@@ -153,27 +263,18 @@ def _read_resources_from_registry(instance_id: str) -> tuple[list[PCIBar], int]:
 
     bars: list[PCIBar] = []
     interrupt_count = 0
-    bar_index = 0
 
-    # Try to read from the device's resource assignment in the registry
     try:
-        # The resource lists are stored as binary data
         key_path = f"SYSTEM\\CurrentControlSet\\Enum\\{instance_id}"
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
-            # Try to read LogConf subkey for resource info
             try:
                 with winreg.OpenKey(key, "LogConf") as logconf:
-                    # BasicConfigVector contains the resource requirements
-                    try:
-                        data, reg_type = winreg.QueryValueEx(logconf, "BootConfig")
-                        bars, interrupt_count = _parse_resource_list(data)
-                    except FileNotFoundError:
-                        pass
-                    # Also try AllocConfig
-                    if not bars:
+                    for val_name in ["BootConfig", "AllocConfig"]:
                         try:
-                            data, reg_type = winreg.QueryValueEx(logconf, "AllocConfig")
+                            data, reg_type = winreg.QueryValueEx(logconf, val_name)
                             bars, interrupt_count = _parse_resource_list(data)
+                            if bars:
+                                return bars, interrupt_count
                         except FileNotFoundError:
                             pass
             except FileNotFoundError:
@@ -281,7 +382,10 @@ def get_goya_pci_info(instance_id: str) -> PCIDeviceInfo:
     except OSError:
         pass
 
-    bars, int_count = _read_resources_from_registry(instance_id)
+    # Try CfgMgr32 LogConf API first (proper), then registry fallback
+    bars, int_count = _read_resources_cfgmgr(dev_inst)
+    if not bars:
+        bars, int_count = _read_resources_from_registry(instance_id)
 
     return PCIDeviceInfo(
         instance_id=instance_id,

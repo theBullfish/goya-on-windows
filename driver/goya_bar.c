@@ -71,11 +71,16 @@ GoyaEvtDeviceAdd(
     WDF_PNPPOWER_EVENT_CALLBACKS pnpPowerCallbacks;
     WDF_IO_QUEUE_CONFIG ioQueueConfig;
     WDFQUEUE queue;
-    DECLARE_CONST_UNICODE_STRING(deviceName, L"\\Device\\GoyaBAR");
-    DECLARE_CONST_UNICODE_STRING(symbolicLink, L"\\DosDevices\\GoyaBAR");
+    static const WCHAR deviceNameBuf[] = L"\\Device\\GoyaBAR";
+    static const WCHAR symbolicLinkBuf[] = L"\\DosDevices\\GoyaBAR";
+    UNICODE_STRING deviceName;
+    UNICODE_STRING symbolicLink;
 
     UNREFERENCED_PARAMETER(Driver);
     PAGED_CODE();
+
+    RtlInitUnicodeString(&deviceName, deviceNameBuf);
+    RtlInitUnicodeString(&symbolicLink, symbolicLinkBuf);
 
     KdPrintEx((DPFLTR_IHVDRIVER_ID, DPFLTR_INFO_LEVEL,
         "GoyaBAR: DeviceAdd\n"));
