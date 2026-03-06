@@ -239,26 +239,30 @@ class SimBARAccessor(BARAccessor):
 # ---------------------------------------------------------------------------
 
 class KMDFBARAccessor(BARAccessor):
-    """BAR access via a custom KMDF driver that exposes BARs to userspace.
+    """BAR access via the goya_bar.sys KMDF driver.
 
-    The driver will be a minimal KMDF driver that:
-    1. Claims PCI device VEN_1DA3 DEV_0001
-    2. Maps BAR0 via MmMapIoSpace
-    3. Exposes IOCTL_READ32 / IOCTL_WRITE32
+    The driver maps BAR0 via MmMapIoSpace and exposes:
+    - IOCTL_GOYA_READ32:  Read a 32-bit register
+    - IOCTL_GOYA_WRITE32: Write a 32-bit register
+    - IOCTL_GOYA_GET_BAR_INFO: Query BAR physical addresses and sizes
 
-    This accessor opens the driver's device interface and issues IOCTLs.
+    See driver/goya_bar.c for the kernel side.
     """
 
-    DEVICE_INTERFACE = r"\\.\GoyaBAR"
+    DEVICE_PATH = r"\\.\GoyaBAR"
 
-    # IOCTL codes (will be defined in driver)
-    IOCTL_READ32  = 0x80002000
-    IOCTL_WRITE32 = 0x80002004
+    # IOCTL codes — must match driver/goya_bar.h CTL_CODE definitions
+    # CTL_CODE(FILE_DEVICE_GOYA=0x8000, function, METHOD_BUFFERED, access)
+    # METHOD_BUFFERED = 0, FILE_READ_ACCESS = 1, FILE_WRITE_ACCESS = 2
+    IOCTL_READ32      = 0x80002000  # CTL_CODE(0x8000, 0x800, 0, 1)
+    IOCTL_WRITE32     = 0x80006004  # CTL_CODE(0x8000, 0x801, 0, 2)
+    IOCTL_GET_BAR_INFO = 0x80002008  # CTL_CODE(0x8000, 0x802, 0, 1)
 
-    def __init__(self) -> None:
+    def __init__(self, bar_index: int = 0) -> None:
+        self._bar_index = bar_index
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
         self._handle = kernel32.CreateFileW(
-            self.DEVICE_INTERFACE,
+            self.DEVICE_PATH,
             0xC0000000,  # GENERIC_READ | GENERIC_WRITE
             0, None,
             3,  # OPEN_EXISTING
@@ -266,37 +270,56 @@ class KMDFBARAccessor(BARAccessor):
         )
         if self._handle == INVALID_HANDLE:
             raise OSError(
-                f"Cannot open Goya BAR driver at {self.DEVICE_INTERFACE}. "
-                "Is the KMDF driver installed?"
+                f"Cannot open Goya BAR driver at {self.DEVICE_PATH}. "
+                "Is the goya_bar.sys KMDF driver installed? "
+                "See driver/README.md for build and install instructions."
             )
 
-    def read32(self, offset: int) -> int:
+    def _ioctl(self, code: int, in_buf: bytes, out_size: int = 0) -> bytes:
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        in_buf = struct.pack("<I", offset)
-        out_buf = (ctypes.c_byte * 4)()
+        out_buf = (ctypes.c_byte * out_size)() if out_size else None
         bytes_returned = wt.DWORD(0)
         ok = kernel32.DeviceIoControl(
-            self._handle, self.IOCTL_READ32,
+            self._handle, code,
             in_buf, len(in_buf),
-            out_buf, 4,
+            out_buf, out_size,
             ctypes.byref(bytes_returned), None,
         )
         if not ok:
-            raise OSError(f"Read32 at 0x{offset:X} failed")
-        return struct.unpack("<I", bytes(out_buf))[0]
+            err = ctypes.get_last_error()
+            raise OSError(f"IOCTL 0x{code:X} failed (error {err})")
+        return bytes(out_buf) if out_buf else b""
+
+    def read32(self, offset: int) -> int:
+        # Input: BarIndex (u32) + Offset (u32)
+        in_buf = struct.pack("<II", self._bar_index, offset)
+        out_buf = self._ioctl(self.IOCTL_READ32, in_buf, 4)
+        return struct.unpack("<I", out_buf)[0]
 
     def write32(self, offset: int, value: int) -> None:
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        in_buf = struct.pack("<II", offset, value)
-        bytes_returned = wt.DWORD(0)
-        ok = kernel32.DeviceIoControl(
-            self._handle, self.IOCTL_WRITE32,
-            in_buf, len(in_buf),
-            None, 0,
-            ctypes.byref(bytes_returned), None,
-        )
-        if not ok:
-            raise OSError(f"Write32 at 0x{offset:X} failed")
+        # Input: BarIndex (u32) + Offset (u32) + Value (u32)
+        in_buf = struct.pack("<III", self._bar_index, offset, value & 0xFFFFFFFF)
+        self._ioctl(self.IOCTL_WRITE32, in_buf)
+
+    def get_bar_info(self) -> list[dict]:
+        """Query BAR physical addresses and sizes from the driver."""
+        # Output: BarCount (u32) + 6 * {PhysAddr (u64) + Length (u64) + IsMapped (u8)}
+        out_size = 4 + 6 * (8 + 8 + 1)  # conservative
+        out_buf = self._ioctl(self.IOCTL_GET_BAR_INFO, b"\x00" * 4, 256)
+        bars = []
+        bar_count = struct.unpack_from("<I", out_buf, 0)[0]
+        offset = 4
+        for i in range(min(bar_count, 6)):
+            phys, length, mapped = struct.unpack_from("<QQB", out_buf, offset)
+            bars.append({
+                "index": i,
+                "physical_address": f"0x{phys:016X}",
+                "length": length,
+                "length_mb": length / (1024 * 1024),
+                "mapped": bool(mapped),
+            })
+            offset += 17
+        return bars
 
     def close(self) -> None:
         if self._handle and self._handle != INVALID_HANDLE:
