@@ -9,7 +9,8 @@ from __future__ import annotations
 import sys
 
 from . import regs
-from .pci import find_goya_devices, SimBARAccessor, BARAccessor
+from .pci import find_goya_devices, SimBARAccessor, BARAccessor, KMDFBARAccessor
+from .pci_config import get_goya_pci_info
 
 
 def probe_bar(bar: BARAccessor) -> dict:
@@ -125,14 +126,46 @@ def main() -> None:
 
     print()
 
-    # Step 3: Real BAR access (requires KMDF driver)
+    # Step 3: PCI configuration (BAR physical addresses)
     if devices:
-        print("[3] Real BAR access...")
-        print("  KMDF driver not yet installed.")
-        print("  To proceed, we need the goya_bar.sys kernel driver.")
-        print("  See docs/init-sequence.md for the BAR access strategy.")
+        print("[3] PCI Configuration (from Windows registry)...")
+        for dev in devices:
+            try:
+                pci_info = get_goya_pci_info(dev.instance_id)
+                print(f"  {pci_info}")
+                if not pci_info.bars:
+                    print("  No BAR resources found (device may need driver to allocate resources)")
+            except Exception as e:
+                print(f"  Config read failed for {dev.instance_id}: {e}")
     else:
-        print("[3] Skipping real BAR access (no devices found).")
+        print("[3] Skipping PCI config (no devices found).")
+
+    print()
+
+    # Step 4: Real BAR access (requires KMDF driver)
+    if devices:
+        print("[4] Real BAR access...")
+        try:
+            bar = KMDFBARAccessor()
+            print("  Driver connected! Reading registers...")
+            info = probe_bar(bar)
+            print_probe(info, prefix="  ")
+            try:
+                bar_info = bar.get_bar_info()
+                print("  BAR Info:")
+                for b in bar_info:
+                    mapped = "MAPPED" if b["mapped"] else "not mapped"
+                    print(f"    BAR{b['index']}: {b['physical_address']} "
+                          f"({b['length_mb']:.1f} MB) [{mapped}]")
+            except Exception:
+                pass
+            bar.close()
+        except OSError:
+            print("  goya_bar.sys driver not installed.")
+            print("  To get real BAR access, build and install the KMDF driver.")
+            print("  See driver/README.md for instructions.")
+    else:
+        print("[4] Skipping real BAR access (no devices found).")
 
     print()
     print("Probe complete.")

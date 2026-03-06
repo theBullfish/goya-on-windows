@@ -1,0 +1,71 @@
+;
+; goya_bar.inf — Installation file for Goya BAR Access Driver
+;
+; Installs a minimal KMDF driver that maps Habana Goya PCI BARs
+; and exposes register read/write IOCTLs to userspace.
+;
+; MIT License — Codex Labs LLC
+;
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider    = %ManufacturerName%
+CatalogFile = goya_bar.cat
+DriverVer   = 03/05/2026,1.0.0.0
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir = 13  ; Driver Store
+
+[SourceDisksNames]
+1 = %DiskName%,,,""
+
+[SourceDisksFiles]
+goya_bar.sys = 1,,
+
+; ---- Manufacturer section ----
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceDesc% = GoyaBAR_Device, PCI\VEN_1DA3&DEV_0001
+
+; ---- Device install section ----
+
+[GoyaBAR_Device.NT]
+CopyFiles = Drivers_Dir
+
+[Drivers_Dir]
+goya_bar.sys
+
+; ---- Service install ----
+
+[GoyaBAR_Device.NT.Services]
+AddService = GoyaBAR,%SPSVCINST_ASSOCSERVICE%, GoyaBAR_Service_Inst
+
+[GoyaBAR_Service_Inst]
+DisplayName   = %ServiceDesc%
+ServiceType   = 1               ; SERVICE_KERNEL_DRIVER
+StartType     = 3               ; SERVICE_DEMAND_START
+ErrorControl  = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary = %13%\goya_bar.sys
+
+; ---- WDF section ----
+
+[GoyaBAR_Device.NT.Wdf]
+KmdfService = GoyaBAR, GoyaBAR_wdfsect
+
+[GoyaBAR_wdfsect]
+KmdfLibraryVersion = 1.33
+
+; ---- Strings ----
+
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ManufacturerName       = "Codex Labs LLC"
+DeviceDesc             = "Habana Goya BAR Access Driver"
+ServiceDesc            = "Goya BAR Access Service"
+DiskName               = "Goya BAR Driver Installation Disk"
